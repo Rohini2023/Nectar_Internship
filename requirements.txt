@@ -1,0 +1,12 @@
+# API Settings
+# AUTH_API_URL=https://your-auth-api-url.com/auth
+# ASSET_API_URL=https://your-api-url.com/assets
+# API_USERNAME=your-username
+# API_PASSWORD=your-password
+
+# Cassandra
+cassandra-driver==3.25.0
+psycopg2==2.9.3
+python-dotenv==0.19.0
+
+# 21052025
