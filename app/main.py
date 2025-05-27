@@ -1,5 +1,6 @@
 from app.cassandra_ops import connect_to_cassandra, get_earliest_log_date
 from app.postgres_ops import connect_postgres, get_last_calculated_date
+from app.assetfetch import fetch_and_filter_assets
 from app.run_hour_calculation import process_asset_for_date
 from datetime import date, datetime, timedelta
 import sys
@@ -49,8 +50,11 @@ def main():
     yesterday = date.today() - timedelta(days=1)
 
     # Default fallback asset list
-    asset_ids = ["AC_001"] 
-    
+    assets = fetch_and_filter_assets() 
+    asset_ids = [a["thingid"] for a in assets if isinstance(a, dict) and "thingid" in a] or ["AC_001"]
+
+
+    # asset_ids = ["AC_001"]
     for thingid in asset_ids:
         logger.info(f"Processing {thingid} (force={force_update})")
 

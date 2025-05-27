@@ -15,8 +15,8 @@ Project/
 |----app/
 | |---__init__.py
 | |---main.py # Orchestrates full workflow
-| |---auth.py #Token-based API authentication
-| |---asset_api.py #Handles paginated asset fetching
+| |---assetfetch.py #Handles paginated asset fetching
+| |---mock_api.py #mock api
 | |---cassandra_ops.py #Cassandra operations
 | |---logger.py #Centralized logging
 | |---postgres_ops.py #PostgreSQL operations
