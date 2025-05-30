@@ -82,8 +82,8 @@ def process_asset_for_date(thingid, cassandra_session, pg_conn, start_date, end_
         logger.info(f"Processing {thingid} from {start_date} to {end_date} (force_update={force_update})")
         
         # Convert dates to UAE timezone at midnight
-        uae_start = datetime.combine(start_date, time.min).replace(tzinfo=uae_tz)
-        uae_end = datetime.combine(end_date, time.min).replace(tzinfo=uae_tz) + timedelta(days=1)
+        # uae_start = datetime.combine(start_date, time.min).replace(tzinfo=uae_tz)
+        # uae_end = datetime.combine(end_date, time.min).replace(tzinfo=uae_tz) + timedelta(days=1)
         
         # Initialize tracking variables
         daily_on_seconds = defaultdict(int)
@@ -117,7 +117,7 @@ def process_asset_for_date(thingid, cassandra_session, pg_conn, start_date, end_
 
         # Handle any hanging ON state with safety limit
         if current_on_start is not None:
-            end_time = min(uae_end, current_on_start + max_on_duration)
+            end_time = min(end_date, current_on_start + max_on_duration)
             _process_duration(current_on_start, end_time, daily_on_seconds)
             logger.warning(f"Auto-terminated hanging ON state at {end_time}")
 

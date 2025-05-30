@@ -64,31 +64,57 @@ def handle_asset_fetching():
     """
     Fetch and validate assets with error handling
     Returns:
-        list: List of asset IDs (thingIds) or fallback ["AC_001"] on failure
+        dict: Returns full asset data structure on success, or fallback asset on failure
+              Format: {
+                  'success': bool,
+                  'assets': list[dict],  # Full asset data when successful
+                  'fallback_used': bool,  # True when using fallback
+                  'error': str  # Only present on failure
+              }
     """
     start_time = time.time()
     asset_result = fetch_and_filter_assets()
     
+    # Prepare base response structure
+    response = {
+        'success': asset_result['success'],
+        'fallback_used': False
+    }
+    
     # Handle API failure cases
     if not asset_result['success']:
         logger.error(f"Asset fetch failed: {asset_result['error']}")
+        response['error'] = asset_result['error']
+        response['fallback_used'] = True
+        
         if asset_result.get('retryable', False):
             logger.warning("Retryable error - using fallback asset AC_001")
         else:
             logger.error("Non-retryable error - using fallback asset AC_001")
-        return ["AC_001"]  # Fallback asset
+        
+        # Return fallback with same structure as successful response
+        response['assets'] = [{
+            "thingId": "AC_001",
+            "displayName": "Fallback Asset",
+            "operationStatus": "ACTIVE",
+            "communicationStatus": "COMMUNICATING",
+            "TimeReference": 1746053925000,
+            "is_fallback": True  # Mark as fallback
+        }]
+        return response
     
-    # Log successful fetch metrics
+    # On success, return all asset data
     logger.info(f"Fetched {asset_result['data']['filtered_count']} assets in {time.time() - start_time:.2f}s")
-    return [asset['thingId'] for asset in asset_result['data']['assets']]
+    response['assets'] = asset_result['data']['assets']
+    return response
 
 def main():
     """Main execution flow for run hour calculation"""
     start_time = time.time()
     
     # Initialize database connections
-    cassandra_session = connect_to_cassandra()  # For status logs
-    pg_conn = connect_postgres()  # For calculated results
+    cassandra_session = connect_to_cassandra()
+    pg_conn = connect_postgres()
     
     try:
         # 1. Parse command line arguments
@@ -96,59 +122,80 @@ def main():
         yesterday = date.today() - timedelta(days=1)
 
         # 2. Fetch assets to process
-        asset_ids = handle_asset_fetching()
-        logger.info(f"Processing {len(asset_ids)} assets: {asset_ids}")
-
+        asset_response = handle_asset_fetching()
+        
+        if not asset_response['success']:
+            logger.warning(f"Using fallback assets due to: {asset_response.get('error', 'Unknown error')}")
+        
+        assets = asset_response['assets']
+        logger.info(f"Processing {len(assets)} assets (fallback used: {asset_response['fallback_used']})")
+        
         # 3. Process each asset
-        for thingid in asset_ids:
+        for asset in assets:
+            thingid = asset['thingId']
             logger.info(f"Processing {thingid} (force={force_update})")
+            
+            # Get createdOn date if available
+            created_date = None
+            if 'createdOn' in asset and asset['createdOn']:
+                try:
+                    created_date = datetime.fromtimestamp(asset['createdOn']/1000).date()
+                    logger.debug(f"Asset {thingid} created on {created_date}")
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Invalid createdOn timestamp for {thingid}: {e}")
 
             # Determine calculation range based on mode
             if force_update:
-                # Force mode - use explicit dates or yesterday
                 if user_start is None:
                     calc_start = calc_end = yesterday
                 else:
                     calc_start = user_start
                     calc_end = user_end or user_start
             else:
-                # Normal mode - calculate from last processed date
                 last_calculated = get_last_calculated_date(pg_conn, thingid)
                 last_date = last_calculated.date() if last_calculated else None
 
                 if user_start is None:
-                    # Automatic range calculation
                     calc_end = yesterday
                     if last_date:
                         calc_start = last_date + timedelta(days=1)
                     else:
-                        # First-time processing - find earliest log
-                        earliest_log = get_earliest_log_date(cassandra_session, thingid)
-                        if not earliest_log:
-                            logger.warning(f"No logs found in Cassandra for {thingid}.")
+                        # Pass created_date to optimize search
+                        calc_start = get_earliest_log_date(
+                            cassandra_session, 
+                            thingid,
+                            created_date=created_date,
+                            scan_end=calc_end
+                        )
+                        if not calc_start:
+                            logger.warning(f"No logs found for {thingid}")
                             continue
-                        calc_start = earliest_log
                 else:
-                    # User-specified range with gap filling
                     calc_end = user_end or user_start
                     if last_date:
                         proposed_start = last_date + timedelta(days=1)
-                        calc_start = proposed_start if proposed_start < user_start else user_start
+                        calc_start = max(proposed_start, user_start) if proposed_start < user_start else user_start
                     else:
-                        earliest_log = get_earliest_log_date(cassandra_session, thingid,
-                                                            max_days_back=365,
-                                                            scan_end=calc_end)
-                        if not earliest_log:
-                            logger.warning(f"No logs found in Cassandra for {thingid}.")
-                            continue
-                        calc_start = min(earliest_log, user_start)
+                        # Use created_date if available and within range
+                        if created_date and created_date <= user_start:
+                            calc_start = created_date
+                            logger.info(f"Using createdOn date {created_date} for {thingid}")
+                        else:
+                            calc_start = get_earliest_log_date(
+                                cassandra_session,
+                                thingid,
+                                created_date=created_date,
+                                scan_end=calc_end
+                            )
+                            if not calc_start:
+                                logger.warning(f"No logs found for {thingid}")
+                                continue
+                            calc_start = min(calc_start, user_start)
 
-            # Skip if no date range to process
             if calc_start > calc_end:
                 logger.info(f"Nothing to calculate for {thingid} in given range.")
                 continue
 
-            # 4. Execute run hour calculation
             logger.info(f"Calculating run hours for {thingid} from {calc_start} to {calc_end}")
             process_asset_for_date(
                 thingid, 
@@ -163,10 +210,10 @@ def main():
         logger.error(f"Critical error in main execution: {str(e)}", exc_info=True)
         sys.exit(1)
     finally:
-        # 5. Cleanup resources
         pg_conn.close()
         cassandra_session.shutdown()
-        logger.info(f"Run hour processing complete. Total execution time: {time.time() - start_time:.2f}s")
+        logger.info(f"Processing complete. Total time: {time.time() - start_time:.2f}s")
+
 
 if __name__ == "__main__":
     main()

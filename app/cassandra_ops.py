@@ -50,12 +50,35 @@ def fetch_logs_for_day(session, thingid, datadate_utc_date):
         return []
     
 
-def get_earliest_log_date(session, thingid, max_days_back=365, scan_end=None):
+def get_earliest_log_date(session, thingid, created_date=None, max_days_back=365, scan_end=None):
+    """
+    Find the earliest log date for an asset, using created_date if available to optimize search
+    
+    Args:
+        session: Cassandra session
+        thingid: Asset identifier
+        created_date: Optional date when asset was created (to optimize search)
+        max_days_back: Maximum days to look back (default: 365)
+        scan_end: End date for scanning (default: yesterday)
+        
+    Returns:
+        date: Earliest log date found or None
+    """
     if scan_end is None:
         scan_end = date.today() - timedelta(days=1)
 
-    scan_start = scan_end - timedelta(days=max_days_back)
+    # Adjust search range based on created_date if available
+    if created_date:
+        # Don't search before the asset was created
+        effective_max_days_back = min(max_days_back, (scan_end - created_date).days)
+        scan_start = max(created_date, scan_end - timedelta(days=max_days_back))
+        logger.debug(f"Using created_date {created_date} to optimize search for {thingid}")
+    else:
+        effective_max_days_back = max_days_back
+        scan_start = scan_end - timedelta(days=max_days_back)
+
     current_date = scan_start
+    found_date = None
 
     while current_date <= scan_end:
         try:
@@ -70,13 +93,17 @@ def get_earliest_log_date(session, thingid, max_days_back=365, scan_end=None):
             result = session.execute(query, (thingid, datadate_ts))
             
             if result.one():
-                logger.info(f"Earliest log found for {thingid} on {current_date}")
-                return current_date
+                logger.debug(f"Found log for {thingid} on {current_date}")
+                found_date = current_date
+                # No need to check further dates - return the first found
+                logger.info(f"Earliest log found for {thingid} on {found_date}")
+                return found_date
                 
         except Exception as e:
             logger.error(f"Query error on {current_date} for {thingid}: {e}")
 
         current_date += timedelta(days=1)
 
-    logger.warning(f"No logs found for {thingid} in the last {max_days_back} days.")
-    return None
+    if found_date is None:
+        logger.warning(f"No logs found for {thingid} between {scan_start} and {scan_end}")
+    return found_date
