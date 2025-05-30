@@ -95,8 +95,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configuration
-MOCK_API_URL = "http://localhost:8080/platform-asset-1.0.0/latest/filter/access"
-MOCK_API_TOKEN = os.getenv("MOCK_API_TOKEN")
+REAL_API_URL = os.getenv("REAL_API_URL")
+REAL_API_TOKEN = os.getenv("REAL_API_TOKEN")
 
 def fetch_and_filter_assets():
     # Prepare request with additional filters
@@ -110,14 +110,14 @@ def fetch_and_filter_assets():
     }
 
     headers = {
-        'Authorization': f'Bearer {MOCK_API_TOKEN}',
+        'Authorization': f'Bearer {REAL_API_TOKEN}',
         'Content-Type': 'application/json'
     }
 
     try:
         # 1. Make API request
         response = requests.post(
-            MOCK_API_URL,
+            REAL_API_URL,
             json=payload,
             headers=headers,
             timeout=10  # Increased timeout for reliability
