@@ -1,7 +1,10 @@
+
+
+# new code ........................................
 # Import dependencies
 from app.cassandra_ops import connect_to_cassandra, get_earliest_log_date
 from app.postgres_ops import connect_postgres, get_last_calculated_date
-from app.assetfetch import fetch_and_filter_assets
+from app.assetfetch import fetch_assets_raw
 from app.run_hour_calculation import process_asset_for_date
 from datetime import date, datetime, timedelta
 import sys
@@ -32,30 +35,32 @@ def get_date_range_from_args():
     """
     Parse command line arguments for date range processing
     Returns:
-        tuple: (start_date, end_date, force_update)
+        tuple: (start_date, end_date, force_update, single_date_mode)
         None values indicate default behavior should be used
+        single_date_mode: boolean indicating if user specified exactly one date
     """
     parser = argparse.ArgumentParser(description='Process run hours for assets')
     parser.add_argument('dates', nargs='*', help='Date range to process (start_date end_date)')
     parser.add_argument('--force', action='store_true', help='Force reprocessing of all dates in range')
     args = parser.parse_args()
 
-    yesterday = date.today() - timedelta(days=1)
     force_update = args.force
+    single_date_mode = False
 
     # Handle different argument combinations
     if len(args.dates) == 0:
-        return None, None, force_update  # Default to auto-range calculation
+        return None, None, force_update, single_date_mode
     elif len(args.dates) == 1:
         d = parse_date(args.dates[0])
-        return d, d, force_update  # Single date mode
+        single_date_mode = True
+        return d, d, force_update, single_date_mode
     elif len(args.dates) == 2:
         start = parse_date(args.dates[0])
         end = parse_date(args.dates[1])
         if end < start:
             logger.error("End date cannot be earlier than start date.")
             sys.exit(1)
-        return start, end, force_update  # Date range mode
+        return start, end, force_update, single_date_mode
     else:
         logger.error("Invalid arguments. Usage: python main.py [start_date] [end_date] [--force]")
         sys.exit(1)
@@ -73,7 +78,7 @@ def handle_asset_fetching():
               }
     """
     start_time = time.time()
-    asset_result = fetch_and_filter_assets()
+    asset_result = fetch_assets_raw()
     
     # Prepare base response structure
     response = {
@@ -94,7 +99,7 @@ def handle_asset_fetching():
         
         # Return fallback with same structure as successful response
         response['assets'] = [{
-            "thingId": "AC_001",
+            "identifier": "AC_001",
             "displayName": "Fallback Asset",
             "operationStatus": "ACTIVE",
             "communicationStatus": "COMMUNICATING",
@@ -118,7 +123,7 @@ def main():
     
     try:
         # 1. Parse command line arguments
-        user_start, user_end, force_update = get_date_range_from_args()
+        user_start, user_end, force_update, single_date_mode = get_date_range_from_args()
         yesterday = date.today() - timedelta(days=1)
 
         # 2. Fetch assets to process
@@ -132,7 +137,7 @@ def main():
         
         # 3. Process each asset
         for asset in assets:
-            thingid = asset['thingId']
+            thingid = asset['identifier']
             logger.info(f"Processing {thingid} (force={force_update})")
             
             # Get createdOn date if available
@@ -156,6 +161,7 @@ def main():
                 last_date = last_calculated.date() if last_calculated else None
 
                 if user_start is None:
+                    # Default mode - calculate up to yesterday
                     calc_end = yesterday
                     if last_date:
                         calc_start = last_date + timedelta(days=1)
@@ -171,16 +177,18 @@ def main():
                             logger.warning(f"No logs found for {thingid}")
                             continue
                 else:
+                    # User specified date(s)
                     calc_end = user_end or user_start
-                    if last_date:
-                        proposed_start = last_date + timedelta(days=1)
-                        calc_start = max(proposed_start, user_start) if proposed_start < user_start else user_start
-                    else:
-                        # Use created_date if available and within range
-                        if created_date and created_date <= user_start:
-                            calc_start = created_date
-                            logger.info(f"Using createdOn date {created_date} for {thingid}")
+                    
+                    if single_date_mode:
+                        # Special handling for single date mode
+                        if last_date:
+                            calc_start = last_date + timedelta(days=1)
+                            if calc_start > calc_end:
+                                logger.info(f"Nothing to calculate for {thingid} (last calculated {last_date})")
+                                continue
                         else:
+                            # No previous calculation - find earliest logs
                             calc_start = get_earliest_log_date(
                                 cassandra_session,
                                 thingid,
@@ -190,7 +198,24 @@ def main():
                             if not calc_start:
                                 logger.warning(f"No logs found for {thingid}")
                                 continue
-                            calc_start = min(calc_start, user_start)
+                            calc_start = min(calc_start, calc_end)
+                    else:
+                        # Date range mode - always respect user's requested range
+                        calc_start = user_start
+                        # Check if we need to backfill from last calculated date
+                        if last_date and last_date + timedelta(days=1) < user_start:
+                            backfill_start = last_date + timedelta(days=1)
+                            backfill_end = user_start - timedelta(days=1)
+                            if backfill_start <= backfill_end:
+                                logger.info(f"Backfilling gap for {thingid} from {backfill_start} to {backfill_end}")
+                                process_asset_for_date(
+                                    thingid, 
+                                    cassandra_session, 
+                                    pg_conn, 
+                                    backfill_start, 
+                                    backfill_end, 
+                                    False
+                                )
 
             if calc_start > calc_end:
                 logger.info(f"Nothing to calculate for {thingid} in given range.")
